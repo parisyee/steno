@@ -6,10 +6,11 @@ A command-line tool that transcribes audio and video files using the Google Gemi
 
 The pipeline is made up of four scripts, each usable standalone or as an importable module:
 
-- **`transcribe.py`** — orchestrator: runs the full pipeline and writes a `.txt` transcript
+- **`transcribe.py`** — orchestrator: runs the full pipeline and writes a `.txt` or `.pdf` transcript
 - **`extract_audio.py`** — extracts audio from video files; passes audio files through unchanged
 - **`trim_deadspace.py`** — removes long silences and noise from audio using ffmpeg
 - **`api_client.py`** — uploads audio to the Gemini Files API and returns the transcript
+- **`pdf.py`** — renders a transcript string or `.txt` file to a styled PDF
 
 ## Supported formats
 
@@ -54,6 +55,9 @@ GEMINI_API_KEY=your-key-here
 # Transcribe an audio or video file (output defaults to <input_name>.txt)
 uv run python transcribe.py recording.m4a
 
+# Output as PDF (includes metadata header; no .txt written)
+uv run python transcribe.py recording.m4a --pdf
+
 # Specify output path
 uv run python transcribe.py recording.m4a -o transcripts/meeting.txt
 
@@ -75,7 +79,8 @@ uv run python transcribe.py screen_recording.mp4 -o notes.txt
 | Option | Default | Description |
 |---|---|---|
 | `input_file` | — | Path to any audio or video file (required) |
-| `-o`, `--output` | `<input>.txt` | Output transcript path |
+| `-o`, `--output` | `<input>.txt` / `<input>.pdf` | Output transcript path |
+| `--pdf` | off | Write a PDF instead of plain text |
 | `--model` | `gemini-2.5-flash` | Gemini model to use |
 | `--skip-trim` | off | Skip silence removal |
 | `--threshold DB` | `-35` | Silence floor in dB; lower = more aggressive |
@@ -106,6 +111,12 @@ uv run python api_client.py audio.m4a
 uv run python api_client.py audio.m4a -o transcript.txt --model gemini-2.5-pro
 ```
 
+**Convert an existing transcript to PDF:**
+```bash
+uv run python pdf.py transcript.txt
+uv run python pdf.py transcript.txt -o output/interview.pdf
+```
+
 ---
 
 ## Temp file handling
@@ -116,4 +127,4 @@ When `transcribe.py` runs the full pipeline, intermediate files are created for 
 
 **When they're deleted:** Cleanup runs in a `finally` block, so temp files are removed whether the run succeeds, fails, or is interrupted mid-pipeline. Only files that were actually created as intermediates are tracked and deleted — the original input is never touched, and any file you provide as an explicit `--output` path is kept.
 
-**What's never deleted:** The final `.txt` transcript, the original input file, and any audio file passed directly to `api_client.py` or `trim_deadspace.py` as a standalone command (those scripts don't do their own cleanup — the caller decides).
+**What's never deleted:** The final `.txt` or `.pdf` transcript, the original input file, and any audio file passed directly to `api_client.py` or `trim_deadspace.py` as a standalone command (those scripts don't do their own cleanup — the caller decides).

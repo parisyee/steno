@@ -4,10 +4,12 @@
 import argparse
 import sys
 import tempfile
+from datetime import date
 from pathlib import Path
 
 from api_client import DEFAULT_MODEL, transcribe_file
 from extract_audio import extract_audio, is_audio
+from pdf import write_pdf
 from trim_deadspace import trim_deadspace
 
 
@@ -19,6 +21,7 @@ def run(
     min_silence_duration: float = 1.5,
     keep_edge_silence: float = 0.3,
     skip_trim: bool = False,
+    pdf: bool = False,
 ) -> Path:
     """Extract audio, optionally trim silence, transcribe, and write a .txt file.
 
@@ -39,7 +42,7 @@ def run(
         sys.exit(f"Error: File not found: {input_path}")
 
     if output_path is None:
-        output_path = input_path.with_suffix(".txt")
+        output_path = input_path.with_suffix(".pdf" if pdf else ".txt")
 
     temp_files: list[Path] = []
 
@@ -75,7 +78,15 @@ def run(
     # Write output
     try:
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text(transcript, encoding="utf-8")
+        if pdf:
+            write_pdf(
+                transcript,
+                output_path,
+                source_name=input_path.name,
+                transcribed_date=date.today().strftime("%B %-d, %Y"),
+            )
+        else:
+            output_path.write_text(transcript, encoding="utf-8")
     except OSError as e:
         sys.exit(f"Error: Cannot write transcript to '{output_path}': {e}")
 
@@ -98,6 +109,11 @@ def main():
         "--model",
         default=DEFAULT_MODEL,
         help=f"Gemini model to use (default: {DEFAULT_MODEL})",
+    )
+    parser.add_argument(
+        "--pdf",
+        action="store_true",
+        help="Write output as a PDF instead of plain text",
     )
     parser.add_argument(
         "--skip-trim",
@@ -135,6 +151,7 @@ def main():
         min_silence_duration=args.min_silence,
         keep_edge_silence=args.keep_edge,
         skip_trim=args.skip_trim,
+        pdf=args.pdf,
     )
 
 
