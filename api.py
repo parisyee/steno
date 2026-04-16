@@ -9,9 +9,9 @@ from fastapi import FastAPI, File, Header, HTTPException, Query, UploadFile
 from fastapi.responses import JSONResponse
 from supabase import create_client, Client
 
-from api_client import DEFAULT_MODEL, transcribe_file
-from extract_audio import extract_audio
-from trim_deadspace import trim_deadspace
+from transcription_service.gemini_client import DEFAULT_MODEL, transcribe_file
+from transcription_service.extract_audio import extract_audio
+from transcription_service.trim_deadspace import trim_deadspace
 
 load_dotenv()
 
