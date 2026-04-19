@@ -3,8 +3,9 @@
 
 Two-pass pipeline:
   1. transcribe_raw()      — Pro model, audio in, verbatim text out (prose).
-  2. analyze_transcript()  — Flash model, text in, JSON with title /
-                             description / cleaned variants out.
+  2. analyze_transcript()  — Flash model, text in, JSON with title,
+                             description, and (optionally) a polished
+                             rewrite of the transcript out.
 """
 
 import argparse
@@ -74,24 +75,15 @@ I bet.
 """
 
 
-ANALYZE_PROMPT = """\
+SUMMARY_PROMPT = """\
 You will be given a verbatim transcript with speaker labels and blank-line spacing.
-Produce four fields as JSON.
+Produce two fields as JSON.
 
 - title: a short sentence (≤10 words) capturing the gist of the conversation.
   Write it in the same language as the transcript. If the transcript mixes
   languages, use the language spoken most.
 - description: 2-4 sentences OR 3-5 short bullet points summarizing what's discussed.
   Use the same language as the title (the transcript's dominant language).
-- cleaned_light: the same transcript with disfluencies removed (um, uh, filler "like" /
-  "you know", obvious false starts). Keep every other word verbatim. Preserve speaker
-  labels and the blank-line spacing exactly as in the input.
-- cleaned_polished: also smooth stutters and repetition, resolve word fumbles to the
-  intended word, and combine fragments into complete sentences where intent is clear.
-  Do NOT paraphrase, summarize, change meaning, or translate. Preserve speaker labels
-  and language switches. Whitespace may be re-derived from natural reading cadence.
-
-Never collapse two speakers' turns into one. Never invent content.
 
 Transcript:
 ---
@@ -100,11 +92,39 @@ Transcript:
 """
 
 
+POLISH_PROMPT = """\
+You will be given a verbatim transcript with speaker labels and blank-line spacing.
+Produce three fields as JSON.
+
+- title: a short sentence (≤10 words) capturing the gist of the conversation.
+  Write it in the same language as the transcript. If the transcript mixes
+  languages, use the language spoken most.
+- description: 2-4 sentences OR 3-5 short bullet points summarizing what's discussed.
+  Use the same language as the title (the transcript's dominant language).
+- cleaned_polished: the transcript with disfluencies removed (um, uh, filler
+  "like" / "you know", false starts), stutters and repetition smoothed, word
+  fumbles resolved to the intended word, and fragments combined into complete
+  sentences where intent is clear. Do NOT paraphrase, summarize, change meaning,
+  or translate. Preserve speaker labels and language switches. Never collapse
+  two speakers' turns into one. Never invent content. Whitespace may be
+  re-derived from natural reading cadence.
+
+Transcript:
+---
+{transcript}
+---
+"""
+
+
+class Summary(BaseModel):
+    title: str
+    description: str
+
+
 class AnalysisResult(BaseModel):
     title: str
     description: str
-    cleaned_light: str
-    cleaned_polished: str
+    cleaned_polished: str | None = None
 
 
 def get_mime_type(file_path: Path) -> str:
@@ -154,22 +174,34 @@ def transcribe_raw(file_path: Path, model: str = DEFAULT_TRANSCRIBE_MODEL) -> st
 
 
 def analyze_transcript(
-    transcript: str, model: str = DEFAULT_ANALYZE_MODEL
+    transcript: str,
+    model: str = DEFAULT_ANALYZE_MODEL,
+    polish: bool = False,
 ) -> AnalysisResult:
-    """Pass 2: derive title, description, and cleaned variants from a transcript."""
+    """Pass 2: derive a title and description from a transcript.
+
+    When ``polish`` is true, also generate a polished rewrite of the transcript
+    (`cleaned_polished`). Generating the polished version roughly doubles the
+    Flash output tokens, so it's opt-in.
+    """
     load_dotenv()
     client = genai.Client()
-    print(f"Analyzing transcript with {model}...")
+    print(f"Analyzing transcript with {model} (polish={polish})...")
+    prompt = POLISH_PROMPT if polish else SUMMARY_PROMPT
+    schema = AnalysisResult if polish else Summary
     response = client.models.generate_content(
         model=model,
-        contents=[ANALYZE_PROMPT.format(transcript=transcript)],
+        contents=[prompt.format(transcript=transcript)],
         config={
             "temperature": 0.0,
             "response_mime_type": "application/json",
-            "response_schema": AnalysisResult,
+            "response_schema": schema,
         },
     )
-    return AnalysisResult.model_validate_json(response.text)
+    if polish:
+        return AnalysisResult.model_validate_json(response.text)
+    summary = Summary.model_validate_json(response.text)
+    return AnalysisResult(title=summary.title, description=summary.description)
 
 
 def main():
@@ -191,10 +223,15 @@ def main():
         help="Skip the analysis pass and only print the raw transcript",
     )
     parser.add_argument(
+        "--polish",
+        action="store_true",
+        help="Also generate a polished rewrite of the transcript",
+    )
+    parser.add_argument(
         "--output",
         "-o",
         type=Path,
-        help="Write JSON {transcript, title, description, cleaned_light, cleaned_polished} to a file",
+        help="Write JSON {transcript, title, description, cleaned_polished?} to a file",
     )
     args = parser.parse_args()
 
@@ -212,8 +249,8 @@ def main():
             print(transcript)
         return
 
-    analysis = analyze_transcript(transcript, args.analyze_model)
-    payload = {"transcript": transcript, **analysis.model_dump()}
+    analysis = analyze_transcript(transcript, args.analyze_model, polish=args.polish)
+    payload = {"transcript": transcript, **analysis.model_dump(exclude_none=True)}
 
     if args.output:
         args.output.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -222,8 +259,8 @@ def main():
         print("\n--- Title ---\n" + analysis.title)
         print("\n--- Description ---\n" + analysis.description)
         print("\n--- Transcript ---\n" + transcript)
-        print("\n--- Cleaned (light) ---\n" + analysis.cleaned_light)
-        print("\n--- Cleaned (polished) ---\n" + analysis.cleaned_polished)
+        if analysis.cleaned_polished:
+            print("\n--- Cleaned (polished) ---\n" + analysis.cleaned_polished)
 
 
 if __name__ == "__main__":

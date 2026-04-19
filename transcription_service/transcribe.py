@@ -3,10 +3,11 @@
 
 Two-pass pipeline:
   1. Pro model produces a verbatim transcript with speaker labels and whitespace.
-  2. Flash model derives a title, description, and cleaned variants from that transcript.
+  2. Flash model derives a title and description (and, optionally, a polished
+     rewrite) from that transcript.
 
-Writes a JSON sidecar (`<input>.json`) alongside the `.txt` transcript so the polished
-versions and metadata are available without re-running the pipeline.
+Writes a JSON sidecar (`<input>.json`) alongside the `.txt` transcript so the
+analysis output is available without re-running the pipeline.
 """
 
 import argparse
@@ -34,12 +35,14 @@ def run(
     keep_edge_silence: float = 0.3,
     skip_trim: bool = False,
     skip_analysis: bool = False,
+    polish: bool = False,
     lock: bool = False,
 ) -> Path:
     """Extract audio, optionally trim silence, transcribe, analyze, and write output files.
 
     Returns the path to the written `.txt` transcript file. When analysis is enabled,
-    a `.json` sidecar with title / description / cleaned variants is written alongside.
+    a `.json` sidecar with title, description, and (optionally) a polished rewrite
+    is written alongside.
     """
     if not input_path.exists():
         sys.exit(f"Error: File not found: {input_path}")
@@ -69,7 +72,7 @@ def run(
         transcript = transcribe_raw(trimmed_path, model=transcribe_model)
         analysis = None
         if not skip_analysis:
-            analysis = analyze_transcript(transcript, model=analyze_model)
+            analysis = analyze_transcript(transcript, model=analyze_model, polish=polish)
 
     finally:
         for tmp in temp_files:
@@ -94,11 +97,9 @@ def run(
             "title": analysis.title,
             "description": analysis.description,
             "transcript": transcript,
-            "cleaned": {
-                "light": analysis.cleaned_light,
-                "polished": analysis.cleaned_polished,
-            },
         }
+        if analysis.cleaned_polished:
+            payload["cleaned_polished"] = analysis.cleaned_polished
         try:
             sidecar_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
             if lock:
@@ -148,6 +149,11 @@ def main():
         help="Skip the second-pass analysis (no title, description, or cleaned versions)",
     )
     parser.add_argument(
+        "--polish",
+        action="store_true",
+        help="Also generate a polished rewrite of the transcript",
+    )
+    parser.add_argument(
         "--threshold",
         type=float,
         default=-35.0,
@@ -180,6 +186,7 @@ def main():
         keep_edge_silence=args.keep_edge,
         skip_trim=args.skip_trim,
         skip_analysis=args.skip_analysis,
+        polish=args.polish,
         lock=args.lock,
     )
 

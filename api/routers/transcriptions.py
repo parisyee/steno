@@ -25,6 +25,7 @@ router = APIRouter()
 async def transcribe(
     file: UploadFile = File(...),
     skip_trim: bool = True,
+    polish: bool = False,
     transcribe_model: str = DEFAULT_TRANSCRIBE_MODEL,
     analyze_model: str = DEFAULT_ANALYZE_MODEL,
     _: None = Depends(check_auth),
@@ -51,7 +52,7 @@ async def transcribe(
                 temp_files.append(trimmed_path)
 
         transcript = transcribe_raw(trimmed_path, model=transcribe_model)
-        analysis = analyze_transcript(transcript, model=analyze_model)
+        analysis = analyze_transcript(transcript, model=analyze_model, polish=polish)
 
     except EmptyTranscriptError as e:
         raise HTTPException(status_code=422, detail=str(e))
@@ -66,16 +67,12 @@ async def transcribe(
             except OSError:
                 pass
 
-    cleaned = {
-        "light": analysis.cleaned_light,
-        "polished": analysis.cleaned_polished,
-    }
     row = get_supabase().table("transcriptions").insert({
         "filename": filename,
         "title": analysis.title,
         "description": analysis.description,
         "text": transcript,
-        "cleaned": cleaned,
+        "cleaned_polished": analysis.cleaned_polished,
     }).execute()
 
     inserted = row.data[0]
@@ -85,7 +82,7 @@ async def transcribe(
         "title": analysis.title,
         "description": analysis.description,
         "text": transcript,
-        "cleaned": cleaned,
+        "cleaned_polished": analysis.cleaned_polished,
         "created_at": inserted["created_at"],
     })
 
@@ -99,7 +96,7 @@ def list_transcriptions(
     rows = (
         get_supabase()
         .table("transcriptions")
-        .select("id, filename, title, description, text, cleaned, created_at")
+        .select("id, filename, title, description, text, cleaned_polished, created_at")
         .order("created_at", desc=True)
         .range(offset, offset + limit - 1)
         .execute()
