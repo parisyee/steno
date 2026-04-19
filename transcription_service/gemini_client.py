@@ -129,6 +129,10 @@ def upload_file(client: genai.Client, file_path: Path, mime_type: str):
     return uploaded
 
 
+class EmptyTranscriptError(Exception):
+    """Raised when transcription produces no text (silent audio, unreadable file, etc.)."""
+
+
 def transcribe_raw(file_path: Path, model: str = DEFAULT_TRANSCRIBE_MODEL) -> str:
     """Pass 1: produce a verbatim transcript with speaker labels and whitespace."""
     load_dotenv()
@@ -141,7 +145,12 @@ def transcribe_raw(file_path: Path, model: str = DEFAULT_TRANSCRIBE_MODEL) -> st
         contents=[TRANSCRIBE_PROMPT, uploaded],
         config={"temperature": 0.0},
     )
-    return response.text
+    text = response.text
+    if not text or not text.strip():
+        raise EmptyTranscriptError(
+            "No speech could be transcribed from the audio file."
+        )
+    return text
 
 
 def analyze_transcript(

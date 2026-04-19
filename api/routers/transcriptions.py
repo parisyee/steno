@@ -12,6 +12,7 @@ from transcription_service.extract_audio import extract_audio
 from transcription_service.gemini_client import (
     DEFAULT_ANALYZE_MODEL,
     DEFAULT_TRANSCRIBE_MODEL,
+    EmptyTranscriptError,
     analyze_transcript,
     transcribe_raw,
 )
@@ -23,7 +24,7 @@ router = APIRouter()
 @router.post("/transcribe")
 async def transcribe(
     file: UploadFile = File(...),
-    skip_trim: bool = False,
+    skip_trim: bool = True,
     transcribe_model: str = DEFAULT_TRANSCRIBE_MODEL,
     analyze_model: str = DEFAULT_ANALYZE_MODEL,
     _: None = Depends(check_auth),
@@ -51,6 +52,9 @@ async def transcribe(
 
         transcript = transcribe_raw(trimmed_path, model=transcribe_model)
         analysis = analyze_transcript(transcript, model=analyze_model)
+
+    except EmptyTranscriptError as e:
+        raise HTTPException(status_code=422, detail=str(e))
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
