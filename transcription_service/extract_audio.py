@@ -2,14 +2,21 @@
 """Extract audio from video files using ffmpeg; pass audio files through unchanged."""
 
 import argparse
+import logging
 import shutil
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
+logger = logging.getLogger(__name__)
+
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v", ".flv", ".wmv", ".ts"}
 AUDIO_EXTENSIONS = {".mp3", ".wav", ".flac", ".ogg", ".m4a", ".aac", ".wma", ".opus"}
+
+
+class AudioProcessingError(Exception):
+    """Raised when ffmpeg fails or input is unprocessable."""
 
 
 def is_video(path: Path) -> bool:
@@ -32,10 +39,10 @@ def extract_audio(input_path: Path, output_path: Path | None = None) -> Path:
         Path to the audio file (may be a new temp file or the original input).
     """
     if not input_path.exists():
-        sys.exit(f"Error: File not found: {input_path}")
+        raise AudioProcessingError(f"File not found: {input_path}")
 
     if not shutil.which("ffmpeg"):
-        sys.exit("Error: ffmpeg is not installed or not on PATH")
+        raise AudioProcessingError("ffmpeg is not installed or not on PATH")
 
     if is_audio(input_path):
         # Already an audio file — return as-is (no temp file created).
@@ -50,7 +57,7 @@ def extract_audio(input_path: Path, output_path: Path | None = None) -> Path:
         tmp.close()
         output_path = Path(tmp.name)
 
-    print(f"Extracting audio from {input_path.name}...")
+    logger.info("extract_audio: extracting from %s", input_path.name)
     cmd = [
         "ffmpeg",
         "-y",
@@ -62,6 +69,7 @@ def extract_audio(input_path: Path, output_path: Path | None = None) -> Path:
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
         # Try again with AAC re-encode in case copy fails (e.g. incompatible container)
+        logger.warning("extract_audio: copy failed, retrying with aac re-encode")
         cmd_reencode = [
             "ffmpeg",
             "-y",
@@ -73,9 +81,11 @@ def extract_audio(input_path: Path, output_path: Path | None = None) -> Path:
         ]
         result2 = subprocess.run(cmd_reencode, capture_output=True, text=True)
         if result2.returncode != 0:
-            sys.exit(f"Error: ffmpeg failed to extract audio:\n{result2.stderr}")
+            raise AudioProcessingError(
+                f"ffmpeg failed to extract audio:\n{result2.stderr}"
+            )
 
-    print(f"Audio extracted to {output_path}")
+    logger.info("extract_audio: wrote %s", output_path)
     return output_path
 
 
@@ -91,7 +101,10 @@ def main():
     args = parser.parse_args()
 
     output = args.output or args.input_file.with_suffix(".m4a")
-    result = extract_audio(args.input_file, output)
+    try:
+        result = extract_audio(args.input_file, output)
+    except AudioProcessingError as e:
+        sys.exit(f"Error: {e}")
     if result == args.input_file:
         print(f"{args.input_file} is already an audio file — no extraction needed.")
 

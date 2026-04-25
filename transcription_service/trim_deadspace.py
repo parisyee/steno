@@ -2,11 +2,19 @@
 """Remove long silences and incomprehensible noise from an audio file using ffmpeg."""
 
 import argparse
+import logging
 import shutil
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
+
+try:
+    from transcription_service.extract_audio import AudioProcessingError
+except ImportError:
+    from extract_audio import AudioProcessingError
+
+logger = logging.getLogger(__name__)
 
 
 def trim_deadspace(
@@ -33,10 +41,10 @@ def trim_deadspace(
         Path to the cleaned audio file (may be a new temp file).
     """
     if not input_path.exists():
-        sys.exit(f"Error: File not found: {input_path}")
+        raise AudioProcessingError(f"File not found: {input_path}")
 
     if not shutil.which("ffmpeg"):
-        sys.exit("Error: ffmpeg is not installed or not on PATH")
+        raise AudioProcessingError("ffmpeg is not installed or not on PATH")
 
     if output_path is None:
         suffix = input_path.suffix or ".m4a"
@@ -57,7 +65,7 @@ def trim_deadspace(
         f"stop_silence={keep_edge_silence}"
     )
 
-    print(f"Trimming dead space from {input_path.name}...")
+    logger.info("trim_deadspace: trimming %s", input_path.name)
     cmd = [
         "ffmpeg",
         "-y",
@@ -67,14 +75,16 @@ def trim_deadspace(
     ]
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
-        sys.exit(f"Error: ffmpeg failed to trim silence:\n{result.stderr}")
+        raise AudioProcessingError(
+            f"ffmpeg failed to trim silence:\n{result.stderr}"
+        )
 
     original_mb = input_path.stat().st_size / 1_048_576
     trimmed_mb = output_path.stat().st_size / 1_048_576
     saved_pct = max(0.0, (1 - trimmed_mb / original_mb) * 100) if original_mb else 0.0
-    print(
-        f"Trimmed audio written to {output_path} "
-        f"({original_mb:.1f} MB → {trimmed_mb:.1f} MB, {saved_pct:.0f}% reduction)"
+    logger.info(
+        "trim_deadspace: %.1f MB -> %.1f MB (%.0f%% reduction)",
+        original_mb, trimmed_mb, saved_pct,
     )
     return output_path
 
@@ -113,13 +123,16 @@ def main():
     args = parser.parse_args()
 
     output = args.output or args.input_file.with_stem(args.input_file.stem + "_trimmed")
-    trim_deadspace(
-        args.input_file,
-        output,
-        silence_threshold=args.threshold,
-        min_silence_duration=args.min_silence,
-        keep_edge_silence=args.keep_edge,
-    )
+    try:
+        trim_deadspace(
+            args.input_file,
+            output,
+            silence_threshold=args.threshold,
+            min_silence_duration=args.min_silence,
+            keep_edge_silence=args.keep_edge,
+        )
+    except AudioProcessingError as e:
+        sys.exit(f"Error: {e}")
 
 
 if __name__ == "__main__":

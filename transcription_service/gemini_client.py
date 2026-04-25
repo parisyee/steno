@@ -11,6 +11,7 @@ Two-pass pipeline:
 import argparse
 import io
 import json
+import logging
 import mimetypes
 import sys
 from pathlib import Path
@@ -18,6 +19,13 @@ from pathlib import Path
 from dotenv import load_dotenv
 from google import genai
 from pydantic import BaseModel
+
+try:
+    from transcription_service.extract_audio import AudioProcessingError
+except ImportError:
+    from extract_audio import AudioProcessingError
+
+logger = logging.getLogger(__name__)
 
 SUPPORTED_AUDIO_TYPES = {
     ".mp3": "audio/mp3",
@@ -134,23 +142,29 @@ def get_mime_type(file_path: Path) -> str:
     mime, _ = mimetypes.guess_type(str(file_path))
     if mime:
         return mime
-    sys.exit(f"Error: Could not determine MIME type for '{file_path.name}'")
+    raise AudioProcessingError(
+        f"Could not determine MIME type for '{file_path.name}'"
+    )
 
 
 def upload_file(client: genai.Client, file_path: Path, mime_type: str):
-    print(f"Uploading {file_path.name} ({mime_type})...")
+    logger.info("uploading %s (%s)", file_path.name, mime_type)
     # Read into a BytesIO with an ASCII-safe name to avoid encoding errors
     # in HTTP headers (filenames may contain Unicode chars like \u202f).
     safe_name = file_path.name.encode("ascii", "replace").decode("ascii")
     buf = io.BytesIO(file_path.read_bytes())
     buf.name = safe_name
     uploaded = client.files.upload(file=buf, config={"mime_type": mime_type})
-    print(f"Upload complete: {uploaded.name}")
+    logger.info("upload complete: %s", uploaded.name)
     return uploaded
 
 
 class EmptyTranscriptError(Exception):
     """Raised when transcription produces no text (silent audio, unreadable file, etc.)."""
+
+
+class GeminiAPIError(Exception):
+    """Raised when the Gemini API returns an unusable response (blocked, quota, etc.)."""
 
 
 def transcribe_raw(file_path: Path, model: str = DEFAULT_TRANSCRIBE_MODEL) -> str:
@@ -159,17 +173,24 @@ def transcribe_raw(file_path: Path, model: str = DEFAULT_TRANSCRIBE_MODEL) -> st
     client = genai.Client()
     mime_type = get_mime_type(file_path)
     uploaded = upload_file(client, file_path, mime_type)
-    print(f"Transcribing with {model}...")
-    response = client.models.generate_content(
-        model=model,
-        contents=[TRANSCRIBE_PROMPT, uploaded],
-        config={"temperature": 0.0},
-    )
-    text = response.text
+    logger.info("transcribing with %s", model)
+    try:
+        response = client.models.generate_content(
+            model=model,
+            contents=[TRANSCRIBE_PROMPT, uploaded],
+            config={"temperature": 0.0},
+        )
+    except Exception as exc:
+        raise GeminiAPIError(f"Gemini generate_content failed: {exc}") from exc
+    try:
+        text = response.text
+    except Exception as exc:
+        raise GeminiAPIError(f"Gemini returned no usable response: {exc}") from exc
     if not text or not text.strip():
         raise EmptyTranscriptError(
             "No speech could be transcribed from the audio file."
         )
+    logger.info("transcription complete: %d chars", len(text))
     return text
 
 
@@ -186,22 +207,34 @@ def analyze_transcript(
     """
     load_dotenv()
     client = genai.Client()
-    print(f"Analyzing transcript with {model} (polish={polish})...")
+    logger.info("analyzing transcript with %s (polish=%s)", model, polish)
     prompt = POLISH_PROMPT if polish else SUMMARY_PROMPT
     schema = AnalysisResult if polish else Summary
-    response = client.models.generate_content(
-        model=model,
-        contents=[prompt.format(transcript=transcript)],
-        config={
-            "temperature": 0.0,
-            "response_mime_type": "application/json",
-            "response_schema": schema,
-        },
-    )
-    if polish:
-        return AnalysisResult.model_validate_json(response.text)
-    summary = Summary.model_validate_json(response.text)
-    return AnalysisResult(title=summary.title, description=summary.description)
+    try:
+        response = client.models.generate_content(
+            model=model,
+            contents=[prompt.format(transcript=transcript)],
+            config={
+                "temperature": 0.0,
+                "response_mime_type": "application/json",
+                "response_schema": schema,
+            },
+        )
+    except Exception as exc:
+        raise GeminiAPIError(f"Gemini generate_content failed: {exc}") from exc
+    try:
+        raw_text = response.text
+    except Exception as exc:
+        raise GeminiAPIError(f"Gemini returned no usable response: {exc}") from exc
+    if not raw_text:
+        raise GeminiAPIError("Gemini returned an empty analysis response")
+    try:
+        if polish:
+            return AnalysisResult.model_validate_json(raw_text)
+        summary = Summary.model_validate_json(raw_text)
+        return AnalysisResult(title=summary.title, description=summary.description)
+    except Exception as exc:
+        raise GeminiAPIError(f"Failed to parse Gemini analysis JSON: {exc}") from exc
 
 
 def main():
