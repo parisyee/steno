@@ -49,10 +49,18 @@ DEFAULT_TRANSCRIBE_MODEL = "gemini-2.5-pro"
 DEFAULT_ANALYZE_MODEL = "gemini-2.5-flash"
 
 # Per-chunk output cap. At ~250 tokens/min observed for verbatim conversational
-# transcription, a 15-min chunk needs ~3.75K tokens; 8K leaves ~2x headroom for
-# fast/dense/multilingual speech while bounding worst-case spend if a chunk
+# transcription, a 9-min chunk needs ~2.25K tokens; 8K leaves ~3.5x headroom
+# for fast/dense/multilingual speech while bounding worst-case spend if a chunk
 # loops despite the chunk length cap.
 MAX_TRANSCRIBE_OUTPUT_TOKENS = 8000
+
+# Pure greedy decoding (temperature=0) is what makes Gemini repetition loops
+# *stable*: once the model picks the loop's first token deterministically, it's
+# locked in. A small amount of noise breaks that lock without meaningfully
+# hurting verbatim accuracy. RETRY_TEMPERATURE bumps further when a chunk does
+# loop, to escape the attractor on the second attempt.
+TRANSCRIBE_TEMPERATURE = 0.2
+RETRY_TEMPERATURE = 0.6
 
 # Kept for backwards compatibility with callers that imported DEFAULT_MODEL.
 DEFAULT_MODEL = DEFAULT_TRANSCRIBE_MODEL
@@ -213,6 +221,25 @@ class TranscriptRepetitionError(GeminiAPIError):
     """
 
 
+class ChunkTruncatedError(GeminiAPIError):
+    """Raised when a single chunk hits max_output_tokens.
+
+    Indicates either (a) unusually dense speech that overflows the cap, or
+    (b) a within-chunk decoding loop that ran until the cap. Either way the
+    chunk's text is suspect and should be retried with higher temperature.
+    Caught and retried by the per-chunk retry wrapper; if retry also fails,
+    propagates as a GeminiAPIError → 502 in the router.
+    """
+
+
+class ChunkRepetitionError(GeminiAPIError):
+    """Raised when a single chunk's output contains a repetition loop.
+
+    Same retry behavior as ChunkTruncatedError — escape the loop attractor
+    by retrying at higher temperature.
+    """
+
+
 def detect_repetition(
     text: str,
     *,
@@ -252,8 +279,15 @@ def _generate_chunk_text(
     file_path: Path,
     model: str,
     prior_context: str | None,
+    temperature: float = TRANSCRIBE_TEMPERATURE,
 ) -> str:
-    """Run a single Gemini transcription pass over one chunk."""
+    """Run a single Gemini transcription pass over one chunk.
+
+    Raises `ChunkTruncatedError` if the response hits the output token cap
+    and `ChunkRepetitionError` if the chunk's own output contains a
+    repetition loop. Both are retryable by the caller via
+    `_transcribe_chunk_with_retry`.
+    """
     mime_type = get_mime_type(file_path)
     uploaded = upload_file(client, file_path, mime_type)
     if prior_context:
@@ -265,27 +299,69 @@ def _generate_chunk_text(
             model=model,
             contents=[prompt, uploaded],
             config={
-                "temperature": 0.0,
+                "temperature": temperature,
                 "max_output_tokens": MAX_TRANSCRIBE_OUTPUT_TOKENS,
             },
         )
     except Exception as exc:
         raise GeminiAPIError(f"Gemini generate_content failed: {exc}") from exc
-    # Hitting the token cap on a 15-min chunk means we either (a) under-
+    # Hitting the token cap on a 9-min chunk means we either (a) under-
     # transcribed legitimate speech or (b) caught a loop mid-flight. Either
-    # way the result is suspect — fail loudly rather than persist a partial.
+    # way the result is suspect — surface as a retryable chunk error.
     finish = _finish_reason(response)
     if finish == "MAX_TOKENS":
-        raise GeminiAPIError(
-            f"Gemini hit max_output_tokens={MAX_TRANSCRIBE_OUTPUT_TOKENS} on a chunk; "
-            f"transcript is truncated and cannot be trusted. "
-            f"Either the audio is unusually dense or the model entered a loop."
+        raise ChunkTruncatedError(
+            f"Gemini hit max_output_tokens={MAX_TRANSCRIBE_OUTPUT_TOKENS} on a chunk "
+            f"(temperature={temperature}); transcript truncated."
         )
     try:
         text = response.text
     except Exception as exc:
         raise GeminiAPIError(f"Gemini returned no usable response: {exc}") from exc
-    return text or ""
+    text = text or ""
+    # Per-chunk repetition check: catches loops that finished naturally below
+    # the token cap, before they get folded into the stitched output.
+    looped, snippet = detect_repetition(text)
+    if looped:
+        raise ChunkRepetitionError(
+            f"Chunk output contains a repetition loop "
+            f"(temperature={temperature}, repeated near: {snippet!r})"
+        )
+    return text
+
+
+def _transcribe_chunk_with_retry(
+    client: genai.Client,
+    file_path: Path,
+    model: str,
+    prior_context: str | None,
+    *,
+    chunk_index: int,
+    chunk_count: int,
+) -> str:
+    """Transcribe one chunk; retry once at higher temperature on chunk-level loops.
+
+    Catches `ChunkTruncatedError` and `ChunkRepetitionError` (both signal a
+    decoding loop), retries the same chunk with `RETRY_TEMPERATURE`. If the
+    retry also fails, the error propagates and the router converts it to a
+    502. Other GeminiAPIError subclasses (network, schema, etc.) are not
+    retried here — the SDK already retries transient transport failures.
+    """
+    try:
+        return _generate_chunk_text(
+            client, file_path, model, prior_context,
+            temperature=TRANSCRIBE_TEMPERATURE,
+        )
+    except (ChunkTruncatedError, ChunkRepetitionError) as exc:
+        logger.warning(
+            "chunk %d/%d failed at temperature=%.2f (%s: %s); retrying at temperature=%.2f",
+            chunk_index, chunk_count, TRANSCRIBE_TEMPERATURE,
+            type(exc).__name__, exc, RETRY_TEMPERATURE,
+        )
+        return _generate_chunk_text(
+            client, file_path, model, prior_context,
+            temperature=RETRY_TEMPERATURE,
+        )
 
 
 def _finish_reason(response) -> str | None:
@@ -331,7 +407,10 @@ def transcribe_raw(file_path: Path, model: str = DEFAULT_TRANSCRIBE_MODEL) -> st
                     i + 1, len(chunks), start_offset,
                 )
                 prior = _build_continuation_context(pieces[-1]) if pieces else None
-                chunk_text = _generate_chunk_text(client, chunk_path, model, prior)
+                chunk_text = _transcribe_chunk_with_retry(
+                    client, chunk_path, model, prior,
+                    chunk_index=i + 1, chunk_count=len(chunks),
+                )
                 if chunk_text.strip():
                     pieces.append(chunk_text.strip())
             text = "\n\n".join(pieces)

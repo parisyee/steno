@@ -26,11 +26,12 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 # Target chunk length and the hard upper bound. We try to land each cut at a
-# silence inside [target - SEARCH_BACK, max] so chunks come out ~10 min on
-# average without ever exceeding ~15 min.
-TARGET_CHUNK_SECONDS = 600.0
-MAX_CHUNK_SECONDS = 900.0
-SEARCH_BACK_SECONDS = 120.0
+# silence inside [target - SEARCH_BACK, max] so chunks come out ~7 min on
+# average without ever exceeding ~9 min. Smaller chunks reduce the surface
+# area for Gemini decoding loops at the cost of more API calls per file.
+TARGET_CHUNK_SECONDS = 420.0
+MAX_CHUNK_SECONDS = 540.0
+SEARCH_BACK_SECONDS = 90.0
 
 # Silence detection params for boundary finding. Looser than trim_deadspace's
 # defaults because we only need *some* break to align to.
